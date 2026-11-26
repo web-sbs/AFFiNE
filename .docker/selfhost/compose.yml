@@ -1,63 +1,59 @@
 name: affine
 
 services:
-  affine:
-    image: ghcr.io/toeverything/affine:stable
-    container_name: affine_server
-    restart: unless-stopped
-    ports:
-      - "3010:3010"
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      smtp-relay:
-        condition: service_healthy
-      affine_migration:
-        condition: service_completed_successfully
-    volumes:
-      - ./data/storage:/root/.affine/storage
-      - ./config:/root/.affine/config
-    environment:
-      REDIS_SERVER_HOST: redis
-      DATABASE_URL: postgresql://affine@postgres:5432/affine
-      DEPLOYMENT_TYPE: selfhosted
-      MAILER_HOST: smtp-relay
-      MAILER_PORT: "25"
-      MAILER_SERVERNAME: "${AFFINE_MAILER_SERVERNAME}"
-      MAILER_SENDER: "${SMTP_RELAY_SEND_FROM}"
-      MAILER_SECURE: "false"
-    networks:
-      - affine
-
-  affine_migration:
-    image: ghcr.io/toeverything/affine:stable
-    container_name: affine_migration_job
+  affine_config:
+    image: alpine:3.22
     restart: "no"
-    command:
-      - sh
-      - -c
-      - node ./scripts/self-host-predeploy.js
-    volumes:
-      - ./data/storage:/root/.affine/storage
-      - ./config:/root/.affine/config
     environment:
-      REDIS_SERVER_HOST: redis
-      DATABASE_URL: postgresql://affine@postgres:5432/affine
-      DEPLOYMENT_TYPE: selfhosted
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      WEB_URL: "${WEB_URL}"
+    volumes:
+      - affine_config:/config
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+
+        if [ -z "$${WEB_URL}" ]; then
+          echo "WEB_URL is required" >&2
+          exit 1
+        fi
+
+        case "$${WEB_URL}" in
+          http://*|https://*)
+            ;;
+          *)
+            echo "WEB_URL must begin with http:// or https://" >&2
+            exit 1
+            ;;
+        esac
+
+        cat > /config/config.json <<EOF
+        {
+          "\$schema": "https://github.com/toeverything/affine/releases/latest/download/config.schema.json",
+          "server": {
+            "name": "SBS Infrastructure Knowledge Base",
+            "externalUrl": "$${WEB_URL}"
+          },
+          "copilot": {
+            "enabled": false
+          }
+        }
+        EOF
+
+        chmod 600 /config/config.json
     networks:
       - affine
 
   redis:
     image: redis:7-alpine
-    container_name: affine_redis
     restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+    volumes:
+      - affine_redis:/data
     healthcheck:
       test:
         - CMD
@@ -72,47 +68,20 @@ services:
     networks:
       - affine
 
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: affine_postgres
-    restart: unless-stopped
-    volumes:
-      - ./data/postgres:/var/lib/postgresql/data
-    environment:
-      POSTGRES_USER: affine
-      POSTGRES_DB: affine
-      POSTGRES_INITDB_ARGS: "--data-checksums"
-      POSTGRES_HOST_AUTH_METHOD: trust
-    healthcheck:
-      test:
-        - CMD
-        - pg_isready
-        - -U
-        - affine
-        - -d
-        - affine
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    networks:
-      - affine
-
   smtp-relay:
     image: ghcr.io/dmitaj/microsoft-365-smtp-relay:latest
-    container_name: affine_smtp_relay
     restart: unless-stopped
     environment:
       Graph_TenantId: "${MICROSOFT_TENANT_ID}"
       Graph_ClientId: "${MICROSOFT_CLIENT_ID}"
       Graph_ClientSecret: "${MICROSOFT_CLIENT_SECRET}"
-      SendFrom: "${SMTP_RELAY_SEND_FROM}"
+      SendFrom: "${SMTP_SEND_FROM}"
       Smtp_Host: "0.0.0.0"
       Smtp_Port: "25"
       LogLevel: "INFO"
       LogPath: "/var/log/smtp-relay"
     volumes:
-      - ./data/smtp-relay-logs:/var/log/smtp-relay
+      - affine_smtp_relay_logs:/var/log/smtp-relay
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -125,6 +94,68 @@ services:
       start_period: 10s
     networks:
       - affine
+
+  affine_migration:
+    image: ghcr.io/toeverything/affine:stable
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - node ./scripts/self-host-predeploy.js
+    environment:
+      REDIS_SERVER_HOST: redis
+      DATABASE_URL: "${DATABASE_URL}"
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_INDEXER_ENABLED: "false"
+    volumes:
+      - affine_storage:/root/.affine/storage
+      - affine_config:/root/.affine/config
+    depends_on:
+      affine_config:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - affine
+
+  affine:
+    image: ghcr.io/toeverything/affine:stable
+    restart: unless-stopped
+    expose:
+      - "3010"
+    environment:
+      REDIS_SERVER_HOST: redis
+      DATABASE_URL: "${DATABASE_URL}"
+      DEPLOYMENT_TYPE: selfhosted
+      AFFINE_INDEXER_ENABLED: "false"
+      MAILER_HOST: smtp-relay
+      MAILER_PORT: "25"
+      MAILER_SENDER: "${SMTP_SEND_FROM}"
+      MAILER_SECURE: "false"
+    volumes:
+      - affine_storage:/root/.affine/storage
+      - affine_config:/root/.affine/config
+    depends_on:
+      affine_config:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      smtp-relay:
+        condition: service_healthy
+      affine_migration:
+        condition: service_completed_successfully
+    networks:
+      - affine
+
+volumes:
+  affine_storage:
+    name: affine_storage
+  affine_config:
+    name: affine_config
+  affine_redis:
+    name: affine_redis
+  affine_smtp_relay_logs:
+    name: affine_smtp_relay_logs
 
 networks:
   affine:
