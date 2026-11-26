@@ -121,8 +121,8 @@ services:
   affine:
     image: ghcr.io/toeverything/affine:stable
     restart: unless-stopped
-    expose:
-      - "3010"
+    ports:
+      - "3010:3010"
     environment:
       REDIS_SERVER_HOST: redis
       DATABASE_URL: "${DATABASE_URL}"
